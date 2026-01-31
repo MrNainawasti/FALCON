@@ -1,0 +1,9 @@
+# --- DATA  ---
+data/
+data/processed/
+data/raw/
+
+# --- SYSTEM FILES ---
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/
