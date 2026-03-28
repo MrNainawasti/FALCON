@@ -1,0 +1,27 @@
+
+{
+  "dataset": "CICIDS2017",
+  "features": [
+    " Flow Duration",
+    " Total Fwd Packets",
+    " Total Backward Packets",
+    " Total Length of Fwd Packets",
+    " Total Length of Bwd Packets",
+    " Flow Bytes/s",
+    " Flow Packets/s",
+    " FIN Flag Count",
+    " SYN Flag Count",
+    " ACK Flag Count",
+    " Packet Length Mean",
+    " Fwd Packet Length Mean",
+    " Bwd Packet Length Mean",
+    " Fwd Packet Length Max",
+    " Bwd Packet Length Min",
+    " Down/Up Ratio",
+    " Flow IAT Mean",
+    " Flow IAT Std",
+    " Active Mean",
+    " Idle Mean",
+    " Subflow Fwd Bytes"
+  ]
+}
