@@ -15,7 +15,7 @@ from packet_pipeline import process_pcap, process_csv
 st.set_page_config(page_title="FALCON Sentinel", page_icon="🛡️", layout="wide")
 st.markdown("""
     <style>
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
     [data-testid="stMetricValue"] { color: #00ff88; font-family: monospace; font-size: 1.8rem; }
     [data-testid="stMetric"] { background-color: #161a25; border: 1px solid #2e3440; padding: 10px; border-radius: 5px; }
@@ -247,7 +247,7 @@ with tab2:
                     
         raw_input = st.text_area("Extracted Features (Scaled):", value=st.session_state['manual_sample'], height=120)
 
-    # --- COMMON SCAN EXECUTION ---
+# --- COMMON SCAN EXECUTION ---
     if st.button("🔍 Scan Signature against Local AI", type="primary"):
         try:
             import joblib
@@ -258,32 +258,37 @@ with tab2:
             if packet.shape[1] != X_train.shape[1]:
                 st.error(f"Shape Mismatch: Model requires {X_train.shape[1]} features. You provided {packet.shape[1]}.")
             else:
-                # --- STRICT SCALING GATEKEEPER ---
-                scaler_path = os.path.join(base_path, "../models/scaler.pkl")
-                if not os.path.exists(scaler_path):
-                    st.error("❌ CRITICAL ERROR: 'scaler.pkl' is missing from your models folder! You must export it from your Jupyter Notebook.")
+                # --- SMART SCALING GATEKEEPER ---
+                # Check if the data is already scaled (max value is 1.0 or less)
+                if np.max(packet) <= 1.5:
+                    # Data came from "Random Pull" and is already AI-ready!
+                    packet_scaled = packet
                 else:
-                    scaler = joblib.load(scaler_path)
-                    
-                    # 1. Clip negative values (Matches Notebook Cell 6)
-                    packet_clipped = np.clip(packet, a_min=0, a_max=None)
-                    
-                    # 2. Apply Log-Transformation (Matches Notebook Cell 6)
-                    packet_log = np.log1p(packet_clipped)
-                    
-                    # 3. Apply the MinMaxScaler
-                    packet_scaled = scaler.transform(packet_log) 
-                    
-                    # Feed the SCALED packet to the AI
-                    recon = model.predict(packet_scaled, verbose=0)
-                    error = float(np.mean(np.power(packet_scaled - recon, 2)))
-                    conf, status = calculate_confidence(error, st.session_state['threshold'])
-                    
-                    st.markdown("### 🧬 Analysis Result")
-                    if status == "Threat":
-                        st.error(f"🚨 **THREAT BLOCKED** | **Confidence:** {conf:.1f}% | **Reconstruction Error:** {error:.5f}")
+                    # Data came from a raw PCAP/CSV upload. It needs to be scaled!
+                    scaler_path = os.path.join(base_path, "../models/scaler.pkl")
+                    if not os.path.exists(scaler_path):
+                        st.error("❌ CRITICAL ERROR: 'scaler.pkl' is missing from your models folder!")
+                        st.stop() # Stop execution if scaler is missing
                     else:
-                        st.success(f"✅ **TRAFFIC ALLOWED** | **Confidence:** {conf:.1f}% | **Reconstruction Error:** {error:.5f}")
+                        scaler = joblib.load(scaler_path)
+                        
+                        # Apply clipping and log-transformation
+                        packet_clipped = np.clip(packet, a_min=0, a_max=None)
+                        packet_log = np.log1p(packet_clipped)
+                        
+                        # Apply the MinMaxScaler
+                        packet_scaled = scaler.transform(packet_log) 
+                
+                # Feed the SCALED packet to the AI
+                recon = model.predict(packet_scaled, verbose=0)
+                error = float(np.mean(np.power(packet_scaled - recon, 2)))
+                conf, status = calculate_confidence(error, st.session_state['threshold'])
+                
+                st.markdown("### 🧬 Analysis Result")
+                if status == "Threat":
+                    st.error(f"🚨 **THREAT BLOCKED** | **Confidence:** {conf:.1f}% | **Reconstruction Error:** {error:.5f}")
+                else:
+                    st.success(f"✅ **TRAFFIC ALLOWED** | **Confidence:** {conf:.1f}% | **Reconstruction Error:** {error:.5f}")
         except Exception as e:
             st.error(f"❌ Error processing signature: {e}")
 # --- FOOTER ---

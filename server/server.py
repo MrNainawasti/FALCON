@@ -12,7 +12,7 @@ from server_engine import load_server_assets, evaluate_global_metrics
 st.set_page_config(page_title="FALCON Server", page_icon="🦅", layout="wide")
 st.markdown("""
     <style>
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
+    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
     [data-testid="stMetricValue"] { color: #ff2b2b; font-family: monospace; font-size: 1.8rem; }
     [data-testid="stMetric"] { background-color: #161a25; border: 1px solid #2e3440; padding: 10px; border-radius: 5px; }
@@ -144,7 +144,7 @@ def get_weights():
     return send_file("global_weights.pkl", as_attachment=True)
 
 if 'flask_started' not in st.session_state:
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5050, debug=False, use_reloader=False), daemon=True).start()
     st.session_state['flask_started'] = True
 
 # --- 6. MAIN UI DASHBOARD ---
