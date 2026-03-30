@@ -31,7 +31,8 @@ def get_server_state():
         'quality_rollbacks': 0, 
         'threats_detected': 0, 
         'latest_consensus_log': [],
-        'last_action': 'success' 
+        'last_action': 'success',
+        'mesh_ready_state': {} 
     }
 state = get_server_state()
 
@@ -41,14 +42,19 @@ def init_server():
     model, X_test, y_true = load_server_assets()
     with open("global_weights.pkl", "wb") as f:
         pickle.dump(model.get_weights(), f)
-    initial_metrics, _ = evaluate_global_metrics(model, X_test, y_true)
-    state['history'].append({
-        "Round": 0, "Accuracy": initial_metrics['Accuracy'], "F1 Score": initial_metrics['F1 Score'],
-        "Precision": initial_metrics['Precision'], "Recall": initial_metrics['Recall']
-    })
     return model, X_test, y_true
 
 global_model, X_test_global, y_true_numeric = init_server()
+
+# --- CORE FIX: Safe State Initialization ---
+# This guarantees history is never empty and prevents the IndexError
+if not state['history']:
+    with st.spinner("Calibrating Global AI Core..."):
+        initial_metrics, _ = evaluate_global_metrics(global_model, X_test_global, y_true_numeric)
+        state['history'].append({
+            "Round": 0, "Accuracy": initial_metrics['Accuracy'], "F1 Score": initial_metrics['F1 Score'],
+            "Precision": initial_metrics['Precision'], "Recall": initial_metrics['Recall']
+        })
 
 # --- 4. THE LATENT CONSENSUS ALGORITHM ---
 def run_latent_consensus():
@@ -78,7 +84,7 @@ def run_latent_consensus():
         state['latest_consensus_log'] = round_logs
 
         # Quality Control Gate
-        if accepted_weights:
+        if accepted_weights and state['history']:
             last_history = state['history'][-1]
             best_f1 = last_history['F1 Score']
             old_weights = global_model.get_weights()
@@ -109,6 +115,7 @@ def run_latent_consensus():
                 })
             
         state['pending_updates'].clear()
+        state['mesh_ready_state'].clear() # Reset readiness for the next round
     except Exception as e: print(f"Consensus Error: {e}")
 
 # --- 5. FLASK BACKGROUND SERVER ---
@@ -143,8 +150,29 @@ def get_status():
 def get_weights():
     return send_file("global_weights.pkl", as_attachment=True)
 
+# --- CROSS-NETWORK MESH ENDPOINTS ---
+@app.route('/set_ready', methods=['POST'])
+def set_ready():
+    node_id = request.form.get('node_id')
+    is_ready = request.form.get('is_ready') == 'true'
+    if node_id:
+        state['mesh_ready_state'][node_id] = is_ready
+    return jsonify({"status": "ok"}), 200
+
+@app.route('/mesh_status', methods=['GET'])
+def get_mesh_status():
+    ready_count = sum(1 for status in state['mesh_ready_state'].values() if status)
+    return jsonify({"ready_count": ready_count}), 200
+
+# Catch errors silently if the port is busy so it doesn't crash the UI thread
+def run_flask():
+    try:
+        app.run(host='0.0.0.0', port=5050, debug=False, use_reloader=False)
+    except Exception as e:
+        print(f"Background API Note: {e}")
+
 if 'flask_started' not in st.session_state:
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5050, debug=False, use_reloader=False), daemon=True).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     st.session_state['flask_started'] = True
 
 # --- 6. MAIN UI DASHBOARD ---
@@ -165,12 +193,16 @@ with st.sidebar:
 
 st.header("Global Defense Dashboard")
 
-latest = state['history'][-1]
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Global F1 Score", f"{latest['F1 Score'] * 100:.2f}%")
-c2.metric("Global Accuracy", f"{latest['Accuracy'] * 100:.2f}%")
-c3.metric("Consensus Rejections", state['rejections'], help="Nodes blocked due to outlier divergence.")
-c4.metric("Quality Rollbacks", state['quality_rollbacks'], help="Updates blocked because they degraded the Global F1 Score.")
+# --- CORE FIX: Wrap the UI to prevent rendering crashes ---
+if state['history']:
+    latest = state['history'][-1]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Global F1 Score", f"{latest['F1 Score'] * 100:.2f}%")
+    c2.metric("Global Accuracy", f"{latest['Accuracy'] * 100:.2f}%")
+    c3.metric("Consensus Rejections", state['rejections'], help="Nodes blocked due to outlier divergence.")
+    c4.metric("Quality Rollbacks", state['quality_rollbacks'], help="Updates blocked because they degraded the Global F1 Score.")
+else:
+    st.warning("⏳ Initializing Global Model... Please wait.")
 
 st.divider()
 

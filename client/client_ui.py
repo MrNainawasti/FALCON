@@ -8,6 +8,7 @@ import time
 import random
 import tempfile
 import json
+import threading
 from client_engine import load_and_calibrate_client, evaluate_full_metrics
 from packet_pipeline import process_pcap, process_csv
 
@@ -22,7 +23,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-SERVER_IP = "127.0.0.1" 
+
+SERVER_IP = "192.168.18.41" 
+
 SERVER_URL = f"http://{SERVER_IP}:5050"
 
 # --- 2. LOAD SIMULATION MATH ---
@@ -43,6 +46,7 @@ def calculate_confidence(mse, thresh):
         return min(99.9, conf), "Threat"
 
 # --- 3. STATE MANAGEMENT ---
+if 'waiting_for_consensus' not in st.session_state: st.session_state['waiting_for_consensus'] = False
 if 'scan_history' not in st.session_state: st.session_state['scan_history'] = []
 if 'total_packets' not in st.session_state: st.session_state['total_packets'] = 0
 if 'threats_blocked' not in st.session_state: st.session_state['threats_blocked'] = 0
@@ -79,61 +83,109 @@ with st.sidebar:
     current_buffer = st.session_state['local_buffer']
     progress_val = min(current_buffer / buffer_cap, 1.0)
     
-    if current_buffer >= buffer_cap:
+    if st.session_state['waiting_for_consensus']:
+        st.info("⏳ Waiting for other network nodes to sync...")
+        try:
+            resp = requests.get(f"{SERVER_URL}/status", timeout=1.5).json()
+            if resp['round'] > st.session_state['current_round']:
+                st.success("Consensus reached. Pulling new Global AI...")
+                
+                try:
+                    r_pull = requests.get(f"{SERVER_URL}/get_weights", timeout=5)
+                    if r_pull.status_code == 200:
+                        model.set_weights(pickle.loads(r_pull.content))
+                        st.session_state['local_metrics'], st.session_state['threshold'] = evaluate_full_metrics(model, X_test, y_true_numeric)
+                except Exception as eval_err:
+                    st.error(f"Failed to apply new weights: {eval_err}")
+                
+                st.session_state['current_round'] = resp['round']
+                st.session_state['waiting_for_consensus'] = False 
+                
+                if resp.get('last_action') == 'rollback':
+                    st.session_state['target_buffer'] += 500
+                    st.warning(f"Server rejected update! Expanding batch size to {st.session_state['target_buffer']}...", icon="⚠️")
+                else:
+                    st.session_state['local_buffer'] = 0 
+                    st.session_state['target_buffer'] = 500
+                    st.toast("🧬 Global Model Auto-Updated!", icon="✅")
+                
+                time.sleep(1)
+                st.rerun()
+        except Exception:
+            pass 
+
+    elif current_buffer >= buffer_cap:
         trigger_sync = False
-        if auto_sync:
-            st.progress(progress_val, text=f"🔄 Auto-Syncing: {current_buffer} Packets...")
-            trigger_sync = True
-        else:
-            st.progress(progress_val, text=f"✅ Ready: {current_buffer} Packets")
-            if st.button("🚀 Push Local Update", type="primary", use_container_width=True):
+        
+        # --- NETWORK-BASED CROSS-CLIENT SYNC LOGIC ---
+        ready_nodes = 0
+        try:
+            # Tell the central server THIS node is ready
+            requests.post(f"{SERVER_URL}/set_ready", data={'node_id': node_name, 'is_ready': 'true'}, timeout=1)
+            
+            # Ask the central server how many total nodes are ready
+            status_resp = requests.get(f"{SERVER_URL}/mesh_status", timeout=1).json()
+            ready_nodes = status_resp.get('ready_count', 0)
+        except Exception: 
+            pass # Fail silently so the sniffer doesn't freeze
+            
+        # Trigger training if the server sees at least 3 nodes are ready
+        is_mesh_ready = (ready_nodes >= 3)
+        # -----------------------------------------
+
+        if is_mesh_ready:
+            if auto_sync:
+                st.progress(1.0, text=f"🔄 Auto-Syncing: {current_buffer} Packets...")
                 trigger_sync = True
+            else:
+                st.progress(1.0, text=f"✅ Ready: {current_buffer} Packets")
+                if st.button("🚀 Push Local Update", type="primary", use_container_width=True):
+                    trigger_sync = True
+        else:
+            # Bypass trigger_sync so the sniffer below continues gathering traffic!
+            st.progress(1.0, text=f"Gathering: {current_buffer} Pkts (Mesh: {ready_nodes}/3 Ready)")
+            st.button(f"🔒 Push Locked ({ready_nodes}/3 Nodes Ready)", disabled=True, use_container_width=True)
 
         if trigger_sync:
             with st.status("Executing Synchronous Federation...", expanded=True) as status:
                 try:
                     status.write("Training on local packet capture...")
+                    stable_weights = model.get_weights() 
+                    
                     train_size = min(current_buffer, len(X_train))
                     idx = np.random.randint(0, len(X_train) - train_size + 1)
                     model.fit(X_train[idx:idx+train_size], X_train[idx:idx+train_size], epochs=1, verbose=0)
                     
-                    status.write("Pushing weights to Central Server...")
-                    weights = model.get_weights()
-                    temp = f"weights_{node_name}.pkl"
-                    with open(temp, 'wb') as f: pickle.dump(weights, f)
+                    new_weights = model.get_weights()
+                    model.set_weights(stable_weights)
                     
-                    with open(temp, 'rb') as f: 
-                        r = requests.post(f"{SERVER_URL}/update_weights", files={'weights': f}, data={'node_id': node_name})
-                    os.remove(temp)
+                    status.write("Initiating background push to Central Server...")
+                    temp = f"weights_{node_name}_{int(time.time()*1000)}.pkl"
+                    with open(temp, 'wb') as f: pickle.dump(new_weights, f)
                     
-                    if r.status_code == 200:
-                        status.write("Waiting for other network nodes to sync...")
-                        while True:
-                            try:
-                                resp = requests.get(f"{SERVER_URL}/status").json()
-                                if resp['round'] > st.session_state['current_round']:
-                                    status.write("Consensus reached. Pulling new Global AI...")
-                                    r_pull = requests.get(f"{SERVER_URL}/get_weights")
-                                    model.set_weights(pickle.loads(r_pull.content))
-                                    
-                                    st.session_state['local_metrics'], st.session_state['threshold'] = evaluate_full_metrics(model, X_test, y_true_numeric)
-                                    st.session_state['current_round'] = resp['round']
-                                    
-                                    if resp.get('last_action') == 'rollback':
-                                        st.session_state['target_buffer'] += 500
-                                        st.warning(f"Server rejected update! Expanding batch size to {st.session_state['target_buffer']}...", icon="⚠️")
-                                    else:
-                                        st.session_state['local_buffer'] = 0 
-                                        st.session_state['target_buffer'] = 500
-                                        st.toast("🧬 Global Model Auto-Updated!", icon="✅")
-                                        
-                                    break
-                            except: pass
-                            time.sleep(1.5) 
-                        st.rerun()
-                    else: st.error("Server rejected the push request.")
-                except Exception as e: st.error(f"Error: {e}")
+                    def background_upload(filepath):
+                        try:
+                            with open(filepath, 'rb') as f: 
+                                requests.post(f"{SERVER_URL}/update_weights", files={'weights': f}, data={'node_id': node_name})
+                        except:
+                            pass
+                        finally:
+                            if os.path.exists(filepath):
+                                os.remove(filepath)
+                    
+                    threading.Thread(target=background_upload, args=(temp,)).start()
+                    
+                    status.write("Upload initiated! Entering waiting state...")
+                    st.session_state['waiting_for_consensus'] = True
+                    st.rerun() 
+                except Exception as e: 
+                    st.error(f"Error: {e}")
     else:
+        # Tell the server this node is NOT YET READY
+        try:
+            requests.post(f"{SERVER_URL}/set_ready", data={'node_id': node_name, 'is_ready': 'false'}, timeout=1)
+        except Exception: pass
+
         st.progress(progress_val, text=f"Gathering: {current_buffer} / {buffer_cap} Min Packets")
         st.button("🔒 Push Locked (Awaiting Data)", disabled=True, use_container_width=True)
 
@@ -184,9 +236,9 @@ with tab1:
         if len(st.session_state['scan_history']) > 50: st.session_state['scan_history'].pop(0)
         st.rerun()
 
-# ==========================================
+
 # TAB 2: MANUAL TESTING SANDBOX
-# ==========================================
+
 with tab2:
     st.info("Test specific network signatures. The Autoencoder will assess the mathematical anomaly score and calculate a confidence percentage.")
     
